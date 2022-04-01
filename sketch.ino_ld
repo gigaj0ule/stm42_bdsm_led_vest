@@ -1,0 +1,423 @@
+// Headers
+#include "sketch.hpp"
+#include "sketch_only_statics.hpp"
+
+// Libraries
+#include <FastLED.h>
+
+using namespace NSFastLED; 
+ 
+#define DATA_PIN  PIN_SPI_MOSI // PA7
+#define CLK_PIN   PIN_SPI_SCK // PA5
+
+int32_t led_type = 0;
+
+
+/*
+                 ~~ Vest LEDs ~~
+
+           [L: 112-123]   [K: 92-111]
+                       \ /
+                  ----- O -----
+             /          |          \
+            /      [J: 87-91]       \
+  [I: 75-86]            |            [F: 49-60]
+           |            |            |
+           O [G: 69-61] O [D: 36-43] O 
+          /             |             \
+[H: 74-70]         [C: 33,34]         [E: 44-48]
+                        |
+                        O
+                      /   \ 
+            [B: 32-16]     [A: 15-0]
+*/
+
+enum direction {forwards, backwards};
+
+void plot_segment(
+        direction plot_direction, 
+        uint16_t led_start, 
+        uint16_t led_end, 
+        uint8_t plot_buffer[]
+    ) {
+
+    uint16_t plot_counter = 0; 
+
+    switch(plot_direction) {
+        case forwards:
+            for(uint16_t i = led_start; i < led_end; i++) {
+
+                uint16_t three_times_startpoint = (3 * led_start);
+                uint16_t three_step_counter = (3 * plot_counter);
+
+                communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = plot_buffer[three_step_counter + 0];
+                communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = plot_buffer[three_step_counter + 1];
+                communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = plot_buffer[three_step_counter + 2];
+
+                plot_counter ++;
+            }
+            break;
+        case backwards:
+            for(uint16_t i = led_end; i > led_start; i--) {
+
+                uint16_t three_times_endpoint = (3 * led_end);
+                uint16_t three_step_counter = (3 * plot_counter);
+
+                communicable.led_banks[0][three_times_endpoint - (three_step_counter - 0)] = plot_buffer[three_step_counter + 0];
+                communicable.led_banks[0][three_times_endpoint - (three_step_counter - 1)] = plot_buffer[three_step_counter + 1];
+                communicable.led_banks[0][three_times_endpoint - (three_step_counter - 2)] = plot_buffer[three_step_counter + 2];
+               
+                plot_counter ++;
+            }
+            break;
+    }
+}
+
+
+//#############################################################################
+// Definitions
+//-----------------------------------------------------------------------------
+NSFastLED::CRGB leds[NUMBER_OF_LEDS_TOTAL];
+
+CLEDController *ledController[36];
+
+static void worker_thread(void* arg) {
+
+    float led_intensity = 64.0f;
+
+    uint64_t radians_offset = 0;
+    uint8_t rainbow_array[NUMBER_OF_BYTES_PER_LED_BANK] = {0};
+
+    // Create a rainbow array!
+    for(int j = 0; j < NUMBER_OF_LED_BANKS; j++) {
+
+        // For every byte in a bank...
+        for(int i = 0; i < NUMBER_OF_BYTES_PER_LED_BANK; i += 3) {
+
+            radians_offset += 2;
+
+            float radians = ((float) radians_offset) * ((PI * 2.0f) / NUMBER_OF_LEDS_PER_BANK); 
+
+            // Create colors
+            float red = (led_intensity * ((sinf(radians)) + 1.0f) / 2.0f);
+            float green = (led_intensity * ((sinf(radians + (2.0f * PI / 3.0f))) + 1.0f) / 2.0f); 
+            float blue = (led_intensity * ((sinf(radians - (2.0f * PI / 3.0f))) + 1.0f) / 2.0f);
+
+            // Populate the index of LED array we're interested in
+            rainbow_array[i + 0] = (uint8_t) green;//(uint8_t) red;   // gn
+            rainbow_array[i + 1] = (uint8_t) red;//(uint8_t) green;  // red
+            rainbow_array[i + 2] = (uint8_t) blue;//(uint8_t) blue;   // blu
+        }
+    }
+
+    while(true) {
+
+        // Symmetric rainbow pattern, starting from the heart:
+        uint16_t max_rainbow_index = sizeof(rainbow_array) - 1;
+        
+        // Cycle the rainbow
+        for(int i = max_rainbow_index; i > 3; i -= 3) {
+            rainbow_array[i-0] = rainbow_array[i - 3];
+            rainbow_array[i-1] = rainbow_array[i - 4];
+            rainbow_array[i-2] = rainbow_array[i - 5];
+        }
+
+        // Shift last color: 
+        uint8_t temp_g = rainbow_array[max_rainbow_index - 0];
+        uint8_t temp_r = rainbow_array[max_rainbow_index - 1];        
+        uint8_t temp_b = rainbow_array[max_rainbow_index - 2];
+
+        rainbow_array[max_rainbow_index - 0] = rainbow_array[2];
+        rainbow_array[max_rainbow_index - 1] = rainbow_array[1];
+        rainbow_array[max_rainbow_index - 2] = rainbow_array[0];
+
+        rainbow_array[2] = temp_g;
+        rainbow_array[1] = temp_r;
+        rainbow_array[0] = temp_b;
+
+        // Init empty every LED bank...
+        for(int j = 0; j < NUMBER_OF_LED_BANKS; j++) {
+            // For every byte in a bank...
+            for(int i = 0; i < NUMBER_OF_BYTES_PER_LED_BANK; i += 1) {
+                communicable.led_banks[j][i] = 0;
+            }
+        }
+
+        uint16_t upcounter = 0; 
+
+        // --------------------------------------------------------------
+        // Symmetric rainbow pattern, starting from the heart:
+
+        // Section J, from heart to underboob
+        // Section [J: 85-90]
+        plot_segment(backwards, 85, 90, rainbow_array);
+
+        // Section K, from heart over left shoulder
+        // Section [K: 91-102]
+        /*
+        plot_segment(forwards, 91, 102, rainbow_array, communicable.led_banks[0]);
+
+        // Section L, from heart over right shoulder
+        // Section [L: 91-102]
+        plot_segment(forwards, 102, 113, rainbow_array, communicable.led_banks[0]);
+
+
+        // Section F, Crosses left boob
+        // Section [F: 49-60]
+        plot_segment(forwards, 47, 59, rainbow_array, communicable.led_banks[0]);
+        */
+
+        /*
+
+        uint8_t F_ends     = 59;
+        uint8_t F_starts   = 47;
+        upcounter = 0; 
+
+        for(int i = F_ends; i > F_starts; i--) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_endpoint = 3 * (F_ends);
+
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 0)] = rainbow_array[three_step_counter + 0];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 1)] = rainbow_array[three_step_counter + 1];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 2)] = rainbow_array[three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+        // ---------
+        // Section [I: 75-85]
+        // Crosses right boob
+        uint8_t I_ends     = 85;
+        uint8_t I_starts   = 73;
+        upcounter = 0; 
+
+        for(int i = I_ends; i > I_starts; i--) {
+        //for(int i = I_starts; i < I_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_endpoint = 3 * (I_ends);
+            //uint16_t three_times_startpoint = 3 * (I_starts);
+
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 0)] = rainbow_array[three_step_counter + 0];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 1)] = rainbow_array[three_step_counter + 1];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 2)] = rainbow_array[three_step_counter + 2];
+         
+            upcounter ++;
+        }
+
+
+        uint8_t rainbow_array_offset = 3*5;
+
+
+        // Section D, from belly to right
+        uint8_t D_ends     = 43;
+        uint8_t D_starts   = 34;
+        upcounter = 0; 
+
+        for(int i = D_starts; i < D_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_startpoint = 3 * (D_starts);
+
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+        // Section G, from belly to left
+        uint8_t G_ends     = 69;
+        uint8_t G_starts   = 60;
+        upcounter = 0; 
+
+        for(int i = G_starts; i < G_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_startpoint = 3 * (G_starts);
+
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+        // Section [C: 33-34]
+        uint8_t C_ends     = 33;
+        uint8_t C_starts   = 31;
+        upcounter = 0; 
+
+        for(int i = C_ends; i > C_starts; i--) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_endpoint = 3 * (C_ends);
+
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+
+        rainbow_array_offset = 3 * (5+9);
+
+        // Section E, from right to mid-back
+        uint8_t E_ends     = 48;
+        uint8_t E_starts   = 43;
+        upcounter = 0; 
+
+        for(int i = E_starts; i < E_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_startpoint = 3 * (E_starts);
+
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+        // Section H, from left to mid-back
+        uint8_t H_ends     = 74;
+        uint8_t H_starts   = 69;
+        upcounter = 0; 
+
+        for(int i = H_starts; i < H_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_startpoint = 3 * (H_starts);
+
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+        
+        rainbow_array_offset = 3 * (5+2);
+
+
+        // Section B, from navel to right butt
+        uint8_t B_ends     = 32;
+        uint8_t B_starts   = 16;
+        upcounter = 0; 
+
+        for(int i = B_starts; i < B_ends; i++) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_startpoint = 3 * (B_starts);
+
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_startpoint + (three_step_counter + 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }
+
+
+        // Section A, from navel to left butt
+        uint8_t A_ends     = 16;
+        uint8_t A_starts   = 0;
+        upcounter = 0; 
+
+        for(int i = A_ends; i > (A_starts - 1); i--) {
+
+            uint16_t three_step_counter = (3 * upcounter);
+            uint16_t three_times_endpoint = 3 * (A_ends);
+
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 0)] = rainbow_array[rainbow_array_offset + three_step_counter + 0];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 1)] = rainbow_array[rainbow_array_offset + three_step_counter + 1];
+            communicable.led_banks[0][three_times_endpoint - (three_step_counter - 2)] = rainbow_array[rainbow_array_offset + three_step_counter + 2];
+
+            upcounter ++;
+        }*/
+
+
+
+        // Now illuminate every LED bank...
+        for(int j = 0; j < NUMBER_OF_LED_BANKS; j++) {
+
+            // For every byte in a bank...
+            for(int i = 0; i < NUMBER_OF_BYTES_PER_LED_BANK; i += 3) {
+
+                // Index of LED array we're interested in
+                uint16_t led_index = (i / 3) + j * NUMBER_OF_LEDS_PER_BANK;
+
+                // Turn the LED on, then pause
+                leds[led_index] 
+                    = NSFastLED::CRGB( 
+                        *(communicable.led_banks[j] + i + 0), 
+                        *(communicable.led_banks[j] + i + 1), 
+                        *(communicable.led_banks[j] + i + 2)
+                    ); 
+            }
+        }
+
+        // Depending on the type of LED chosen, switch what is used here
+        ledController[communicable.led_type]->showLeds();
+        
+        // Pass off this task
+        os_delay(50);
+    }
+}
+
+void setup() {
+
+    // Init communication
+    early_setup();
+
+    // Init controllers
+    ledController[0] = &FastLED.addLeds<LPD6803, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[1] = &FastLED.addLeds<LPD8806, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[2] = &FastLED.addLeds<WS2801, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[3] = &FastLED.addLeds<WS2803, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[4] = &FastLED.addLeds<SM16716, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[5] = &FastLED.addLeds<P9813, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[6] = &FastLED.addLeds<APA102, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[7] = &FastLED.addLeds<SK9822, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[8] = &FastLED.addLeds<DOTSTAR, DATA_PIN, CLK_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[9] = &FastLED.addLeds<SM16703, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+
+    // 10
+    ledController[10] = &FastLED.addLeds<TM1829, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[11] = &FastLED.addLeds<TM1812, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[12] = &FastLED.addLeds<TM1809, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[13] = &FastLED.addLeds<TM1804, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[14] = &FastLED.addLeds<TM1803, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[15] = &FastLED.addLeds<UCS1903, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[16] = &FastLED.addLeds<UCS1903B, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[17] = &FastLED.addLeds<UCS1904, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[18] = &FastLED.addLeds<UCS2903, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[19] = &FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+
+    // 20
+    ledController[20] = &FastLED.addLeds<WS2852, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[21] = &FastLED.addLeds<WS2812B, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[22] = &FastLED.addLeds<GS1903, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[23] = &FastLED.addLeds<SK6812, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[24] = &FastLED.addLeds<APA106, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[25] = &FastLED.addLeds<PL9823, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[26] = &FastLED.addLeds<WS2811, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[27] = &FastLED.addLeds<WS2813, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[28] = &FastLED.addLeds<APA104, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[29] = &FastLED.addLeds<WS2811_400, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    
+    // 30
+    ledController[30] = &FastLED.addLeds<GE8822, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[31] = &FastLED.addLeds<GW6205, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[32] = &FastLED.addLeds<GW6205_400, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[33] = &FastLED.addLeds<LPD1886, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+    ledController[34] = &FastLED.addLeds<LPD1886_8BIT, DATA_PIN, RGB>(leds, NUMBER_OF_LEDS_TOTAL);
+
+    // Launch program!
+    create_threads(worker_thread, 5, 3);
+};
+
+void loop(){
+    // Unused
+};
